@@ -53,6 +53,7 @@ metadata_t *freelist;
  */
 enum my_malloc_err my_malloc_errno;
 
+static metadata_t* merge(metadata_t* node, metadata_t* next);
 
 // // if freelist available
 // void *findBestBlock(size_t size) {
@@ -76,7 +77,115 @@ enum my_malloc_err my_malloc_errno;
 // 		if (currBlock->size < size)
 // 	}
 // }
-	
+
+
+metadata_t* get_block_from_freelist(size_t request_size) {
+    if (freelist == NULL) {
+        return NULL;
+    }
+    metadata_t* prev_block_ptr = NULL;
+    metadata_t* curr_block_ptr = freelist;
+    metadata_t* best_fit_ptr = NULL;
+
+    // looking for the block that is either greater than or equal to the user requested size
+    // look for the block that best fit in the freelist and set prev and next blocks
+    while (curr_block_ptr->next != NULL && curr_block_ptr->size < request_size ) {
+        prev_block_ptr = curr_block_ptr;
+        curr_block_ptr = curr_block_ptr->next;
+
+    }
+
+    //a)when the block is exactly the same size
+    if (request_size == curr_block_ptr->size) {
+        best_fit_ptr = curr_block_ptr;
+
+        if (prev_block_ptr == NULL) {
+            freelist = curr_block_ptr->next;
+        } else {
+            prev_block_ptr->next = curr_block_ptr->next;
+            curr_block_ptr->next = NULL;
+
+        }
+        curr_block_ptr->canary = ((uintptr_t)curr_block_ptr^CANARY_MAGIC_NUMBER)-curr_block_ptr->size;
+        unsigned int* tail_carany = (unsigned int*)((uint8_t*)(curr_block_ptr) + curr_block_ptr->size 
+        	- sizeof(curr_block_ptr->canary));
+        *tail_carany = curr_block_ptr->canary;
+        // best_fit_ptr = (metadata_t*) ((uintptr_t)curr_block_ptr + sizeof(metadata_t));
+        my_malloc_errno = NO_ERROR;
+        return (void*) (best_fit_ptr + 1);
+
+    }
+
+    //b)when the block is big enough to house a new block
+    unsigned int block_space_left_over = curr_block_ptr->size - request_size;
+    if (curr_block_ptr->size > request_size && block_space_left_over >= MIN_BLOCK_SIZE) {
+        best_fit_ptr = curr_block_ptr;
+        if (prev_block_ptr == NULL) {
+            freelist = curr_block_ptr->next;
+        } else {
+            prev_block_ptr->next = curr_block_ptr->next;
+            curr_block_ptr->next = NULL;
+        }
+        //split the block size and get the block size that we want out of the freelist
+        //left_over_block_ptr points to the new block that we want to split
+        metadata_t* left_over_block_ptr = (metadata_t*)((uint8_t*)curr_block_ptr + request_size);
+        
+        //set the canaries current block pointer
+        best_fit_ptr->size = request_size;
+        best_fit_ptr->next = NULL;
+        curr_block_ptr->canary = ((uintptr_t)curr_block_ptr^CANARY_MAGIC_NUMBER)-curr_block_ptr->size;
+        unsigned int* tail_carany_curr = (unsigned int*)((uint8_t*)(curr_block_ptr) + curr_block_ptr->size 
+        	- sizeof(curr_block_ptr->canary));
+        *tail_carany_curr = curr_block_ptr->canary;
+        
+        //set the canaries for the new block
+        left_over_block_ptr->size = block_space_left_over;
+        left_over_block_ptr->next = NULL;
+
+        left_over_block_ptr->canary = ((uintptr_t)left_over_block_ptr^CANARY_MAGIC_NUMBER)-left_over_block_ptr->size;
+        unsigned int* tail_carany_left_over = (unsigned int*)((uint8_t*)(left_over_block_ptr) + curr_block_ptr->size 
+        	- sizeof(left_over_block_ptr->canary));
+        *tail_carany_left_over = left_over_block_ptr->canary;
+        curr_block_ptr->next = left_over_block_ptr;
+
+        //add the left over space back to the freelist
+        if (freelist == NULL) {
+            freelist = left_over_block_ptr;
+            my_malloc_errno = NO_ERROR;
+
+            return (void*)(best_fit_ptr + 1);
+        }
+        metadata_t* new_freelist_ptr = freelist;
+        metadata_t* prev_newfreelist_ptr = NULL;
+        int keep_track = 0;
+
+        while (new_freelist_ptr != NULL) {
+            if (left_over_block_ptr->size < new_freelist_ptr->size) {
+                if (prev_newfreelist_ptr != NULL) {
+                    prev_newfreelist_ptr->next = left_over_block_ptr;
+                    left_over_block_ptr->next = new_freelist_ptr;
+                    keep_track = 1;
+                } else {
+                    left_over_block_ptr->next = new_freelist_ptr;
+                    freelist = left_over_block_ptr;
+                    keep_track = 1;
+                }
+                my_malloc_errno = NO_ERROR;
+                return (void*) (best_fit_ptr + 1);
+            }
+            prev_newfreelist_ptr = new_freelist_ptr;
+            new_freelist_ptr = new_freelist_ptr->next;
+        }
+
+        if (keep_track == 0) {
+            prev_newfreelist_ptr->next = left_over_block_ptr;
+        }
+        my_malloc_errno = NO_ERROR;
+        return (void*) (best_fit_ptr + 1);
+    }
+    my_malloc_errno = NO_ERROR;
+    return (void*) (best_fit_ptr + 1);
+}
 
 /* MALLOC
  * See my_malloc.h for documentation
@@ -85,7 +194,7 @@ void *my_malloc(size_t size) {
 	// UNUSED_PARAMETER(size);
     // return NULL;
     unsigned int request_size = size + TOTAL_METADATA_SIZE;
-    if (request_size > SBRK_SIZE) {
+    if (request_size > SBRK_SIZE) {	
     	my_malloc_errno = SINGLE_REQUEST_TOO_LARGE;
     	return NULL;
     }
@@ -94,116 +203,152 @@ void *my_malloc(size_t size) {
     	return NULL;
     }
 
-	// check freelist
-	if (freelist) {
-		// find the best fit block
-		metadata_t* bestFitBlock = findBestBlock(size);
-		
-		// split the block: canary, size, ....
+    metadata_t* best_fit_ptr = get_block_from_freelist(request_size);
 
-		return (void*) (((char*) bestFitBlock) + sizeof(int) + sizeof(metadata_t)); 
-		// (void *)(((char *)bestFitBlock) + sizeof(metadata_t));
-	} else {
-		freelist = my_sbrk(SBRK_SIZE);
-		if (!freelist) {
-			my_malloc_errno = OUT_OF_MEMORY;
-			return NULL;
-		}
-		freelist->size = size; 
-		return my_malloc(size);
+    //d)create the new block 
+    if (best_fit_ptr == NULL) {
+        metadata_t* new_block = (metadata_t*)my_sbrk(SBRK_SIZE);
+        if (new_block == NULL) {
+            my_malloc_errno = OUT_OF_MEMORY;
+            return NULL;
+        } else {
+            new_block->size = SBRK_SIZE;
+            new_block->next = NULL;
+            if (freelist == NULL) {
+                freelist = new_block;
+            } else {
+                metadata_t* curr_block = freelist;
+                while(curr_block != NULL) {
+                    if ((metadata_t*) ((uint8_t*)curr_block + curr_block->size) == new_block) {
+                        curr_block->size += new_block->size;
+                    }
+                    curr_block = curr_block->next;
+                }
+            }
+            best_fit_ptr = get_block_from_freelist(request_size);
+        }
+    }
+    my_malloc_errno = NO_ERROR;
+    return best_fit_ptr;
+	
+}
+
+/*
+ * Helper function to append to merge two nodes together
+ */
+static metadata_t* merge(metadata_t* node, metadata_t* next) {
+    if (next == freelist) {
+        freelist = node;
+    }
+	if ((uintptr_t)((char*)node + node->size) == (uintptr_t)next) {
+        node->size = node->size + next->size;
+        node->next = next->next;
+        node->canary = (uintptr_t)node^node->size;
+        // *(unsigned long*)(move_ptr(node, node->size - 1)) =
+        //     (uintptr_t)node^((metadata_t*)node)->size;
+        // (((uintptr_t)node^CANARY_MAGIC_NUMBER)-node->size) = (uintptr_t)node^((metadata_t*)node)->size; 
+   	} else if ((((uintptr_t)node ^ CANARY_MAGIC_NUMBER) - node->size) < (uintptr_t)next) {
+		node->next = next;
 	}
+	// curr_block_ptr->canary = ((uintptr_t)curr_block_ptr^CANARY_MAGIC_NUMBER)-curr_block_ptr->size;
+ //    unsigned int* tail_carany_curr = (unsigned int*)((uint8_t*)(curr_block_ptr) + curr_block_ptr->size 
+ //    	- sizeof(curr_block_ptr->canary));
+ //    *tail_carany_curr = curr_block_ptr->canary;
+
+    return node;
 }
-
-
-
-
-void *my_malloc2(size_t size) {
-    // UNUSED_PARAMETER(size);
-    // return NULL;
-    unsigned int request_size = size + TOTAL_METADATA_SIZE + sizeof(int);
-    if (request_size > SBRK_SIZE) {
-    	my_malloc_errno = SINGLE_REQUEST_TOO_LARGE;
-    	return NULL;
-    }
-    if (size == 0) {
-    	my_malloc_errno = NO_ERROR;
-    	return NULL;
-    }
-
-    // loop through the freelist to find the best fit block
-  	metadata_t *currBlock = freelist;
-  	metadata_t *bestFitBlock = NULL;
-  	while (currBlock != NULL) {
-  		// check if the current block is large enough
-  		if (currBlock->size >= request_size) {
-  			// check if the it is the smallest fit?
-  			if (bestFitBlock == NULL) {
-  				bestFitBlock = currBlock;
-  			} else {
-  				// check if the current block can offer us a better (smaller)
-  				if (bestFitBlock->size > currBlock->size) {
-  					bestFitBlock = currBlock; 
-  				}
-  			}
-  		}
-  		printf("%d\n",bestFitBlock->size);
-   		currBlock = currBlock->next;
-  	}
-
-  	//If the freelist is either NULL or does not contain any big enough block, the bestMatch will be still NULL.
-  	//then we need to call my_sbrk() to give us a new fresh 2KB free junk of memory
-  	if (bestFitBlock == NULL) {
-  		bestFitBlock = my_sbrk(SBRK_SIZE);
-  		//check if my_sbrk return failure
-  		if (bestFitBlock == NULL) {
-  			my_malloc_errno = OUT_OF_MEMORY;
-  			return NULL;
-  		}
-
-  		// OOPS: you forget to set up the metadata for this 2KB free block. Do we need to care it
-  		// because at the end before we return the block to the user we will do it?
-  		// ANS: yes
-  		bestFitBlock->size = SBRK_SIZE;
-  		// bestFitBlock->request_size = 0;
-  		// bestFitBlock->prev = NULL;
-  		bestFitBlock->next = freelist;
-
-  		//add it into the free list
-  		if (freelist == NULL) {
-  			freelist = bestFitBlock;
-  		} else {
-	  		// freelist->prev = bestFitBlock;
-	  		freelist = bestFitBlock;
-  		}
-  		//now the 2KB free block is added to the front of the freelist
-  	}
-  	printf("%p\n", (void *)bestFitBlock);
-  	printf("%s\n", "----------------------------------");
-  	return bestFitBlock;
-}
-
 
 /* REALLOC
  * See my_malloc.h for documentation
  */
 void *my_realloc(void *ptr, size_t size) {
-    UNUSED_PARAMETER(ptr);
-    UNUSED_PARAMETER(size);
-    return NULL;
+    // UNUSED_PARAMETER(ptr);
+    // UNUSED_PARAMETER(size);
+    // return NULL;
+
+    my_malloc_errno = NO_ERROR;
+    metadata_t* newblock = my_malloc(size);
+    if (newblock == NULL) {
+        if (ptr != NULL) {
+            my_free(ptr);
+        }
+        return NULL;
+    }
+
+    if (ptr != NULL) {
+        size_t new_size;
+        if ((newblock - 1)->size > ((metadata_t*)ptr - 1)->size) {
+            new_size = (((metadata_t*)ptr - 1)->size - TOTAL_METADATA_SIZE);
+        } else {
+            new_size = ((newblock - 1)->size - TOTAL_METADATA_SIZE);
+        }
+        memcpy(newblock, ptr, new_size);
+        my_free(ptr);
+    }
+    return newblock;
+
 }
 
 /* CALLOC
  * See my_malloc.h for documentation
  */
 void *my_calloc(size_t nmemb, size_t size) {
-    UNUSED_PARAMETER(nmemb);
-    UNUSED_PARAMETER(size);
-    return NULL;
+    // UNUSED_PARAMETER(nmemb);
+    // UNUSED_PARAMETER(size);
+    // return NULL;
+    my_malloc_errno = NO_ERROR;
+    size_t total_size = nmemb * size;
+    metadata_t* newblock = my_malloc(total_size);
+    if (newblock == NULL) {
+        return NULL;
+    }
+    memset(newblock, 0, total_size);
+    return newblock;
 }
 
 /* FREE
  * See my_malloc.h for documentation
  */
 void my_free(void *ptr) {
-    UNUSED_PARAMETER(ptr);
+    // UNUSED_PARAMETER(ptr);
+
+    my_malloc_errno = NO_ERROR;
+	// proper address of the block
+	metadata_t* block = (metadata_t*) ptr - 1;
+	// check canaries
+	unsigned int original_canary = (uintptr_t)block^block->size;
+	unsigned int canary = block->canary;
+
+	if (original_canary != canary) {
+		my_malloc_errno = CANARY_CORRUPTED;
+		return;
+	} else {
+		canary = ((uintptr_t)block^CANARY_MAGIC_NUMBER) - block->size;
+		if (original_canary != canary) {
+			my_malloc_errno = CANARY_CORRUPTED;
+			return;
+		}
+	}
+
+	if (!freelist) {
+		freelist = block;
+		return;
+	}
+
+    metadata_t dummy;
+	metadata_t* prev_block = &dummy;
+	prev_block->next = freelist;
+	while(prev_block->next != NULL
+		&& (((uintptr_t)block^CANARY_MAGIC_NUMBER) - block->size) > (uintptr_t)prev_block->next) {
+		prev_block = prev_block->next;
+	}
+
+    if (prev_block->next != NULL) {
+        merge(block, prev_block->next);
+    }
+
+    if (prev_block != &dummy) {
+        merge(prev_block, block);
+    }
+
 }
