@@ -749,11 +749,12 @@ START_TEST(test_malloc_free_null) {
     my_malloc_errno = OUT_OF_MEMORY;
     my_free(NULL);
     ck_assert_int_eq(my_malloc_errno, NO_ERROR);
+    // printf("753 \n");
 }
 END_TEST
 
 START_TEST(test_malloc_free_bad_meta_canary) {
-    // Set errno to something else to check if student is setting it
+    // Set errno to something else to check if student is studentetting it
     my_malloc_errno = OUT_OF_MEMORY;
     metadata_t *meta = (metadata_t *)(my_sbrk_fake_heap + 128);
     meta->size = 64;
@@ -791,11 +792,14 @@ START_TEST(test_malloc_free_empty_freelist) {
     meta->canary = *tail_canary = ((uintptr_t)meta ^ CANARY_MAGIC_NUMBER) - meta->size;
 
     my_free(meta + 1);
+    printf("795\n");
     ck_assert_int_eq(my_malloc_errno, NO_ERROR);
-
+    printf("797\n");    
     // Freelist contains 1 node
     ck_assert(freelist);
+    printf("800\n"); 
     ck_assert(!freelist->next);
+    printf("802\n");    
     ck_assert_ptr_eq(freelist, meta);
 }
 END_TEST
